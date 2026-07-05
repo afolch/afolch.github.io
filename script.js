@@ -4,22 +4,41 @@
 function parsejarCSV(text) {
     const textNet = text.replace(/\r/g, "").replace(/^\uFEFF/, "").trim();
     const linies = textNet.split("\n");
-    const partits = [];
+    let partitsFinals = [];
+    const equipsPerGrup = {}; 
+    const resultatsManuals = {}; // Memòria per guardar els gols que tu escriguis
     
     if (linies.length <= 1) return [];
 
-    const primeraLinia = linies[0].toLowerCase();
-    const separador = primeraLinia.includes(";") ? ";" : ",";
-
-    for (let i = 1; i < linies.length; i++) {
+    for (let i = 0; i < linies.length; i++) {
         const linia = linies[i].trim();
         if (!linia) continue; 
 
-        if (linia.startsWith("#") || linia.startsWith("//")) continue; 
+        const separador = linia.includes(";") ? ";" : ",";
 
+        // 1. DETECTAR LLISTA D'EQUIPS
+        if (linia.startsWith("#EQUIP")) {
+            const parts = linia.split(separador);
+            const grupNom = parts[1]?.trim().toUpperCase();
+            const equipNom = parts[2]?.trim();
+            
+            if (grupNom && equipNom) {
+                if (!equipsPerGrup[grupNom]) equipsPerGrup[grupNom] = [];
+                if (!equipsPerGrup[grupNom].includes(equipNom)) {
+                    equipsPerGrup[grupNom].push(equipNom);
+                }
+            }
+            continue;
+        }
+
+        if (linia.startsWith("#") || linia.startsWith("//")) continue; 
+        if (linia.toLowerCase().startsWith("grup")) continue;
+
+        // 2. LLEGIR PARTITS MANUALS (Resultats que tu afegeixes)
         const columnes = linia.split(separador); 
-        
-        const grup = columnes[0]?.trim() || "";
+        if (columnes.length < 5) continue;
+
+        const grup = columnes[0]?.trim().toUpperCase() || "";
         const equip1 = columnes[1]?.trim() || "";
         const gols1Raw = columnes[2]?.trim();
         const equip2 = columnes[3]?.trim() || "";
@@ -29,16 +48,64 @@ function parsejarCSV(text) {
         const gols2 = (gols2Raw === "" || gols2Raw === undefined) ? null : Number(gols2Raw);
 
         if (grup && equip1 && equip2) {
-            partits.push({ 
-                grup: grup.toUpperCase(), 
-                equip1, 
-                gols1: isNaN(gols1) ? null : gols1, 
-                equip2, 
-                gols2: isNaN(gols2) ? null : gols2 
-            });
+            if (["VUITENS", "QUARTS", "SEMIS", "FINAL"].includes(grup)) {
+                partitsFinals.push({ grup, equip1, gols1: isNaN(gols1) ? null : gols1, equip2, gols2: isNaN(gols2) ? null : gols2 });
+            } else {
+                const clauPartit = `${grup}_${equip1}_${equip2}`;
+                const clauInversa = `${grup}_${equip2}_${equip1}`;
+                
+                resultatsManuals[clauPartit] = { gols1, gols2 };
+                resultatsManuals[clauInversa] = { gols1: gols2, gols2: gols1 };
+            }
         }
     }
-    return partits;
+
+    // 3. MUNTAR EL CALENDARI COMPLET DE GRUPS (Creuant Sorteig + Gols Manuals)
+    for (const grup in equipsPerGrup) {
+        const llista = equipsPerGrup[grup];
+        const n = llista.length;
+        
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+                const eq1 = llista[i];
+                const eq2 = llista[j];
+                
+                const clauDirecta = `${grup}_${eq1}_${eq2}`;
+                const clauInversa = `${grup}_${eq2}_${eq1}`;
+                
+                let gols1 = null;
+                let gols2 = null;
+                
+                if (resultatsManuals[clauDirecta] !== undefined) {
+                    gols1 = resultatsManuals[clauDirecta].gols1;
+                    gols2 = resultatsManuals[clauDirecta].gols2;
+                } else if (resultatsManuals[clauInversa] !== undefined) {
+                    gols1 = resultatsManuals[clauInversa].gols1;
+                    gols2 = resultatsManuals[clauInversa].gols2;
+                }
+
+                partitsFinals.push({
+                    grup: grup,
+                    equip1: eq1,
+                    gols1: isNaN(gols1) ? null : gols1,
+                    equip2: eq2,
+                    gols2: isNaN(gols2) ? null : gols2
+                });
+            }
+        }
+    }
+
+    // 🌟 4. ORDENAR ELS PARTITS: JUGATS A DALT, PENDENTS A BAIX
+    partitsFinals.sort((a, b) => {
+        const aJugat = a.gols1 !== null && a.gols2 !== null;
+        const bJugat = b.gols1 !== null && b.gols2 !== null;
+        
+        if (aJugat && !bJugat) return -1; // 'a' va abans perquè està jugat
+        if (!aJugat && bJugat) return 1;  // 'b' va abans perquè està jugat
+        return 0;                         // Es manté l'ordre si tots dos són iguals
+    });
+
+    return partitsFinals;
 }
 
 // ==========================================================================
@@ -92,120 +159,110 @@ function calcularGrups(partits) {
 }
 
 // ==========================================================================
-// 3. GENERAR TOT EL QUADRE D'ELIMINATÒRIES TOTALMENT DINÀMIC
+// 3. GENERAR TOT EL QUADRE D'ELIMINATÒRIES (8 EQUIPS = QUARTS, 16 EQUIPS = VUITENS)
 // ==========================================================================
 function calcularFaseFinalCompleta(dadesGrups, partitsCSV) {
-    const fases = { VUITENS: [], QUARTS: [], SEMIS: [], FINAL: [] };
+    const fases = { FINAL: [], SEMIS: [], QUARTS: [], VUITENS: [] };
     
-    const llistaGrups = Object.keys(dadesGrups).filter(g => g !== "VUITENS" && g !== "QUARTS" && g !== "SEMIS" && g !== "FINAL").sort();
+    const llistaGrups = Object.keys(dadesGrups).filter(g => !["FINAL", "SEMIS", "QUARTS", "VUITENS"].includes(g)).sort();
     if (llistaGrups.length === 0) return fases;
 
-    let totsElsGrupsTancats = true;
-    llistaGrups.forEach(g => {
-        const equips = dadesGrups[g];
-        const partitsEsperats = equips.length - 1;
-        const grupTancat = equips.length > 0 && equips.every(e => e.pj === partitsEsperats);
-        if (!grupTancat) totsElsGrupsTancats = false;
-    });
+    // Comptem el total d'equips al torneig (com que passen tots, és el total de classificats)
+    let totalEquipsTorneig = 0;
+    llistaGrups.forEach(g => { totalEquipsTorneig += dadesGrups[g].length; });
 
-    const esCas12Equips = llistaGrups.length === 3;
-    const primeraRondaReal = esCas12Equips ? "QUARTS" : (Object.values(dadesGrups).flat().length > 16 ? "VUITENS" : "QUARTS");
+    // 🌟 LA MATEMÀTICA CORRECTA:
+    let primeraRondaReal = "QUARTS"; 
+    if (totalEquipsTorneig > 8) {
+        primeraRondaReal = "VUITENS"; // Si hi ha 16 equips en total, arrenca a Vuitens
+    } else if (totalEquipsTorneig <= 4) {
+        primeraRondaReal = "SEMIS";   // Si només fossin 4 equips totals
+    }
 
     function buscarResultatCSV(ronda, eq1, eq2) {
+        const n1 = eq1.trim().toLowerCase();
+        const n2 = eq2.trim().toLowerCase();
         return partitsCSV.find(p => p.grup === ronda && 
-            ((p.equip1 === eq1 && p.equip2 === eq2) || (p.equip1 === eq2 && p.equip2 === eq1))
+            ((p.equip1.trim().toLowerCase() === n1 && p.equip2.trim().toLowerCase() === n2) || 
+             (p.equip1.trim().toLowerCase() === n2 && p.equip2.trim().toLowerCase() === n1))
         );
     }
 
-    if (esCas12Equips) {
-        let q1_1, q1_2, q2_1, q2_2, q3_1, q3_2, q4_1, q4_2;
+    const vuitensManuals = partitsCSV.filter(p => p.grup === "VUITENS");
+    const quartsManuals = partitsCSV.filter(p => p.grup === "QUARTS");
+    const semisManuals = partitsCSV.filter(p => p.grup === "SEMIS");
+    const finalManuals = partitsCSV.filter(p => p.grup === "FINAL");
 
-        if (totsElsGrupsTancats) {
-            const A1 = dadesGrups["A"][0].nom;
-            const A2 = dadesGrups["A"][1].nom;
-            const B1 = dadesGrups["B"][0].nom;
-            const B2 = dadesGrups["B"][1].nom;
-            const C1 = dadesGrups["C"][0].nom;
-            const C2 = dadesGrups["C"][1].nom;
-
-            const tercers = [
-                { grup: "A", dades: dadesGrups["A"][2] },
-                { grup: "B", dades: dadesGrups["B"][2] },
-                { grup: "C", dades: dadesGrups["C"][2] }
-            ];
-            
-            tercers.sort((a, b) => 
-                b.dades.pts - a.dades.pts || 
-                (b.dades.gf - b.dades.gc) - (a.dades.gf - a.dades.gc) || 
-                b.dades.gf - a.dades.gf
-            );
-
-            const millorTercer = tercers[0];
-            const segonMillorTercer = tercers[1];
-            const tercerEliminat = tercers[2];
-
-            q1_1 = A1; 
-            q1_2 = (tercerEliminat.grup === "C") ? segonMillorTercer.dades.nom : millorTercer.dades.nom;
-            q2_1 = B1; 
-            q2_2 = (tercerEliminat.grup === "C") ? millorTercer.dades.nom : segonMillorTercer.dades.nom;
-            q3_1 = C1; 
-            q3_2 = A2;
-            q4_1 = B2; 
-            q4_2 = C2;
+    // --- 1. CONFIGURAR VUITENS DE FINAL (Només si el quadrant és de 16 equips) ---
+    if (primeraRondaReal === "VUITENS") {
+        if (vuitensManuals.length > 0) {
+            fases.VUITENS = [...vuitensManuals];
         } else {
-            q1_1 = "1r Grup A"; q1_2 = "Millor 3r A/B/C";
-            q2_1 = "1r Grup B"; q2_2 = "2n Millor 3r A/B/C";
-            q3_1 = "1r Grup C"; q3_2 = "2n Grup A";
-            q4_1 = "2n Grup B"; q4_2 = "2n Grup C";
-        }
-
-        const partitsQuarts = [{ e1: q1_1, e2: q1_2 }, { e1: q2_1, e2: q2_2 }, { e1: q3_1, e2: q3_2 }, { e1: q4_1, e2: q4_2 }];
-        partitsQuarts.forEach(q => {
-            const csv = buscarResultatCSV("QUARTS", q.e1, q.e2);
-            fases.QUARTS.push({ grup: "QUARTS", equip1: q.e1, gols1: csv?.gols1 ?? null, equip2: q.e2, gols2: csv?.gols2 ?? null });
-        });
-
-    } else {
-        let rankingGlobal = [];
-        llistaGrups.forEach(g => {
-            dadesGrups[g].forEach((eq, idx) => {
-                rankingGlobal.push({ ...eq, pos: idx + 1 });
-            });
-        });
-        
-        rankingGlobal.sort((a,b) => a.pos - b.pos || b.pts - a.pts);
-        const llistaNoms = rankingGlobal.map(e => e.nom);
-
-        if (primeraRondaReal === "VUITENS") {
             for (let i = 0; i < 8; i++) {
-                const eq1 = totsElsGrupsTancats ? llistaNoms[i] : `1r/2n general`;
-                const eq2 = totsElsGrupsTancats ? llistaNoms[15 - i] : `3r/4t general`;
-                const csv = buscarResultatCSV("VUITENS", eq1, eq2);
-                fases.VUITENS.push({ grup: "VUITENS", equip1: eq1, gols1: csv?.gols1 ?? null, equip2: eq2, gols2: csv?.gols2 ?? null });
+                fases.VUITENS.push({ grup: "VUITENS", equip1: `Equip Lliga`, gols1: null, equip2: `Equip Lliga`, gols2: null });
             }
-        } else if (primeraRondaReal === "QUARTS") {
+        }
+    }
+
+    // --- 2. CONFIGURAR QUARTS DE FINAL (La teva ronda inicial actual de 4 partits) ---
+    if (quartsManuals.length > 0) {
+        // MANA EL TEU CSV: Carreguem les 4 línies de QUARTS que has escrit a mà
+        fases.QUARTS = [...quartsManuals];
+    } else {
+        if (primeraRondaReal === "QUARTS") {
+            // Si no hi ha res escrit al CSV, omplim amb text provisional d'espera (4 partits de Quarts)
             for (let i = 0; i < 4; i++) {
-                const eq1 = totsElsGrupsTancats ? llistaNoms[i] : `1r del grup`;
-                const eq2 = totsElsGrupsTancats ? llistaNoms[7 - i] : `2n/3r del grup`;
+                fases.QUARTS.push({ grup: "QUARTS", equip1: `Equip Q${i+1}`, gols1: null, equip2: `Equip Q${i+1}`, gols2: null });
+            }
+        } else if (primeraRondaReal === "VUITENS") {
+            // Si vinguéssim de vuitens (16 equips), els quarts es calcularien amb els guanyadors reals de vuitens
+            for (let i = 0; i < 4; i++) {
+                const pV1 = fases.VUITENS[i*2]; const pV2 = fases.VUITENS[i*2 + 1];
+                let eq1 = `Guanyador V${i*2 + 1}`; let eq2 = `Guanyador V${i*2 + 2}`;
+                if (pV1 && pV1.gols1 !== null && pV1.gols2 !== null) eq1 = Number(pV1.gols1) > Number(pV1.gols2) ? pV1.equip1 : pV1.equip2;
+                if (pV2 && pV2.gols1 !== null && pV2.gols2 !== null) eq2 = Number(pV2.gols1) > Number(pV2.gols2) ? pV2.equip1 : pV2.equip2;
                 const csv = buscarResultatCSV("QUARTS", eq1, eq2);
                 fases.QUARTS.push({ grup: "QUARTS", equip1: eq1, gols1: csv?.gols1 ?? null, equip2: eq2, gols2: csv?.gols2 ?? null });
             }
         }
     }
 
-    for (let i = 0; i < 2; i++) {
-        const pQ1 = fases.QUARTS[i*2];
-        const pQ2 = fases.QUARTS[i*2 + 1];
-        const eq1 = pQ1 && pQ1.gols1 !== null ? (pQ1.gols1 > pQ1.gols2 ? pQ1.equip1 : pQ1.equip2) : `Guanyador Q${i*2 + 1}`;
-        const eq2 = pQ2 && pQ2.gols1 !== null ? (pQ2.gols1 > pQ2.gols2 ? pQ2.equip1 : pQ2.equip2) : `Guanyador Q${i*2 + 2}`;
-        const csv = buscarResultatCSV("SEMIS", eq1, eq2);
-        fases.SEMIS.push({ grup: "SEMIS", equip1: eq1, gols1: csv?.gols1 ?? null, equip2: eq2, gols2: csv?.gols2 ?? null });
+    // --- 3. CONFIGURAR SEMIFINALS (2 partits, surten dels guanyadors dels 4 partits de Quarts) ---
+    if (semisManuals.length > 0) {
+        fases.SEMIS = [...semisManuals];
+    } else {
+        for (let i = 0; i < 2; i++) {
+            const pQ1 = fases.QUARTS[i*2];     // Partit 1 de la parella de quarts
+            const pQ2 = fases.QUARTS[i*2 + 1]; // Partit 2 de la parella de quarts
+            
+            let eq1 = `Guanyador Q${i*2 + 1}`;
+            let eq2 = `Guanyador Q${i*2 + 2}`;
+
+            if (pQ1 && pQ1.gols1 !== null && pQ1.gols2 !== null) {
+                eq1 = Number(pQ1.gols1) > Number(pQ1.gols2) ? pQ1.equip1 : pQ1.equip2;
+            }
+            if (pQ2 && pQ2.gols1 !== null && pQ2.gols2 !== null) {
+                eq2 = Number(pQ2.gols1) > Number(pQ2.gols2) ? pQ2.equip1 : pQ2.equip2;
+            }
+
+            const csv = buscarResultatCSV("SEMIS", eq1, eq2);
+            fases.SEMIS.push({ grup: "SEMIS", equip1: eq1, gols1: csv?.gols1 ?? null, equip2: eq2, gols2: csv?.gols2 ?? null });
+        }
     }
 
-    const eq1Final = fases.SEMIS[0] && fases.SEMIS[0].gols1 !== null ? (fases.SEMIS[0].gols1 > fases.SEMIS[0].gols2 ? fases.SEMIS[0].equip1 : fases.SEMIS[0].equip2) : "Finalista 1";
-    const eq2Final = fases.SEMIS[1] && fases.SEMIS[1].gols1 !== null ? (fases.SEMIS[1].gols1 > fases.SEMIS[1].gols2 ? fases.SEMIS[1].equip1 : fases.SEMIS[1].equip2) : "Finalista 2";
-    const csvFinal = buscarResultatCSV("FINAL", eq1Final, eq2Final);
-    fases.FINAL.push({ grup: "FINAL", equip1: eq1Final, gols1: csvFinal?.gols1 ?? null, equip2: eq2Final, gols2: csvFinal?.gols2 ?? null });
+    // --- 4. CONFIGURAR FINAL (1 partit, surt dels guanyadors de les 2 Semis) ---
+    if (finalManuals.length > 0) {
+        fases.FINAL = [...finalManuals];
+    } else {
+        const pS1 = fases.SEMIS[0];
+        const pS2 = fases.SEMIS[1];
+        
+        let eq1Final = pS1 && pS1.gols1 !== null && pS1.gols2 !== null ? (Number(pS1.gols1) > Number(pS1.gols2) ? pS1.equip1 : pS1.equip2) : "Finalista 1";
+        let eq2Final = pS2 && pS2.gols1 !== null && pS2.gols2 !== null ? (Number(pS2.gols1) > Number(pS2.gols2) ? pS2.equip1 : pS2.equip2) : "Finalista 2";
+
+        const csvFinal = buscarResultatCSV("FINAL", eq1Final, eq2Final);
+        fases.FINAL.push({ grup: "FINAL", equip1: eq1Final, gols1: csvFinal?.gols1 ?? null, equip2: eq2Final, gols2: csvFinal?.gols2 ?? null });
+    }
 
     return fases;
 }
@@ -255,7 +312,7 @@ function dibuixarWeb(partits, nomFitxerActual) {
         });
 
         for (const nomGrup in partitsPerGrup) {
-            let grupPartitsHTML = `<div class="grup-partits"><h3>${["VUITENS", "QUARTS", "SEMIS", "FINAL"].includes(nomGrup) ? nomGrup : "Grup " + nomGrup}</h3>`;
+            let grupPartitsHTML = `<div class="grup-partits"><h3>${["FINAL", "SEMIS", "QUARTS", "VUITENS"].includes(nomGrup) ? nomGrup : "Grup " + nomGrup}</h3>`;
             partitsPerGrup[nomGrup].forEach(p => {
                 const resultatText = (p.gols1 !== null && p.gols2 !== null) ? `${p.gols1} - ${p.gols2}` : "vs";
                 grupPartitsHTML += `<div class="partit"><span class="equip">${p.equip1}</span><span class="resultat">${resultatText}</span><span class="equip">${p.equip2}</span></div>`;
@@ -343,6 +400,7 @@ function generarPalmares(llistaFichers) {
                 // Si té resultat la final, tenim un campió històric legítim!
                 if (finalPartit && finalPartit.gols1 !== null && finalPartit.gols2 !== null) {
                     const guanyador = finalPartit.gols1 > finalPartit.gols2 ? finalPartit.equip1 : finalPartit.equip2;
+                    const perdedor = finalPartit.equip1 === guanyador ? finalPartit.equip2 : finalPartit.equip1;
                     const nomTorneigEstilitzat = formatarNomTorneig(fitxer);
 
                     targetesHTML += `
@@ -351,6 +409,7 @@ function generarPalmares(llistaFichers) {
                             <div class="palmares-corona">👑</div>
                             <div class="palmares-campio">${guanyador}</div>
                             <div class="palmares-res">Resultat Final: ${finalPartit.gols1} - ${finalPartit.gols2}</div>
+                            <div class="palmares-subcampio">${perdedor}</div>
                         </div>
                     `;
                 }
